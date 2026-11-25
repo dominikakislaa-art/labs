@@ -1,0 +1,1047 @@
+openapi: 3.0.3
+
+info:
+  title: FoodTrack — API отслеживания заказа доставки еды
+  version: 1.0.0
+  description: |
+    Учебный API сервиса доставки еды «FoodTrack» (задача 14).
+
+    Сервис позволяет клиенту создать заказ, посмотреть его карточку и текущий
+    статус, получить полную историю изменения статусов и отменить заказ, пока
+    курьер его не забрал. Ресторан и поддержка меняют статус через
+    `PATCH /orders/{orderId}/status`.
+
+    Статусы образуют конечный автомат:
+    `created → cooking → delivering → done`, боковая ветка — `cancelled`
+    (только из `created` и `cooking`).
+
+    Все даты передаются в ISO 8601 UTC (`2026-11-25T12:24:10Z`), суммы — целые
+    числа в рублях. Ошибки возвращаются в едином формате `Error`.
+  contact:
+    name: Кислая Д.А.
+    email: d.kislaya@example.edu
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Локальный mock-сервер (Prism) для демонстрации
+  - url: https://api.foodtrack.example.com/v1
+    description: Демонстрационный стенд
+
+tags:
+  - name: Заказы
+    description: Создание заказа, карточка заказа и список заказов клиента
+  - name: Статусы
+    description: Смена статуса и отмена заказа
+  - name: История
+    description: Журнал изменения статусов заказа
+
+paths:
+  /orders:
+    post:
+      tags:
+        - Заказы
+      operationId: createOrder
+      summary: Создать заказ
+      description: |
+        Создаёт заказ в статусе `created` и рассчитывает итоговую сумму по
+        позициям меню. Цены берутся из каталога, клиент передаёт только
+        `dishId` и количество.
+
+        Для безопасного повтора предусмотрен необязательный заголовок
+        `Idempotency-Key`: повтор с тем же ключом и тем же телом возвращает
+        `201` и исходный заказ (заголовок `Idempotency-Replayed: true`),
+        повтор с другим телом отклоняется с `400`.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Ключ идемпотентности в формате UUID. Хранится 24 часа.
+            Пример: `6f1c2a9e-3b7d-4c1e-9a55-1042c0ffee14`.
+          schema:
+            type: string
+            format: uuid
+            example: 6f1c2a9e-3b7d-4c1e-9a55-1042c0ffee14
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+            examples:
+              pizzaOrder:
+                summary: Заказ №1042 — пицца, салат и морс
+                value:
+                  customer:
+                    name: Анна Петрова
+                    phone: "+7 913 555-01-42"
+                  deliveryAddress: г. Новосибирск, ул. Ленина, 42, кв. 17
+                  comment: Позвонить за 10 минут
+                  items:
+                    - dishId: 501
+                      quantity: 1
+                    - dishId: 512
+                      quantity: 2
+                      comment: Без гренок
+                    - dishId: 530
+                      quantity: 1
+      responses:
+        '201':
+          description: Заказ создан, статус `created`
+          headers:
+            Idempotency-Replayed:
+              description: Присутствует и равно `true`, если ответ повторён по ключу идемпотентности
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                created:
+                  summary: Создан заказ №1042 на 1320 ₽
+                  value:
+                    orderId: 1042
+                    status: created
+                    createdAt: '2026-11-25T11:58:12Z'
+                    updatedAt: '2026-11-25T11:58:12Z'
+                    customer:
+                      name: Анна Петрова
+                      phone: "+7 913 555-01-42"
+                    deliveryAddress: г. Новосибирск, ул. Ленина, 42, кв. 17
+                    comment: Позвонить за 10 минут
+                    items:
+                      - itemId: 1
+                        dishId: 501
+                        name: Пицца Маргарита
+                        quantity: 1
+                        unitPrice: 590
+                        totalPrice: 590
+                      - itemId: 2
+                        dishId: 512
+                        name: Салат Цезарь
+                        quantity: 2
+                        unitPrice: 290
+                        totalPrice: 580
+                      - itemId: 3
+                        dishId: 530
+                        name: Морс клюквенный
+                        quantity: 1
+                        unitPrice: 150
+                        totalPrice: 150
+                    totalPrice: 1320
+                    courier: null
+                    estimatedDeliveryAt: '2026-11-25T12:45:00Z'
+                    cancelReason: null
+                    cancelledAt: null
+        '400':
+          description: |
+            Некорректный запрос: битый JSON, неизвестный `dishId`, повтор
+            `Idempotency-Key` с другим телом.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                badRequest:
+                  summary: Неизвестное блюдо
+                  value:
+                    code: BAD_REQUEST
+                    message: Блюдо с идентификатором 999 не найдено в меню
+                    details:
+                      field: items[0].dishId
+                      dishId: 999
+        '422':
+          description: |
+            Данные разобраны, но нарушают правила: пустой список позиций,
+            количество ≤ 0, пустой адрес доставки.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                emptyItems:
+                  summary: Пустой состав заказа
+                  value:
+                    code: VALIDATION_FAILED
+                    message: Заказ должен содержать хотя бы одну позицию
+                    details:
+                      field: items
+                badQuantity:
+                  summary: Некорректное количество
+                  value:
+                    code: VALIDATION_FAILED
+                    message: Количество для блюда 501 должно быть больше нуля
+                    details:
+                      field: items[0].quantity
+                      dishId: 501
+    get:
+      tags:
+        - Заказы
+      operationId: listOrders
+      summary: Список заказов
+      description: |
+        Возвращает заказы с необязательным фильтром по текущему статусу и
+        пагинацией `limit` / `offset`. Сортировка — по `createdAt` по
+        убыванию, затем по `orderId` по убыванию.
+
+        `meta.total` — общее количество заказов под фильтром, без учёта
+        страницы. Если `offset` больше или равен `total`, возвращается пустой
+        `items` и код `200`.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Фильтр по текущему статусу заказа
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+        - name: limit
+          in: query
+          required: false
+          description: Размер страницы, от 1 до 100
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+        - name: offset
+          in: query
+          required: false
+          description: Смещение от начала выборки, не меньше нуля
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+            example: 0
+      responses:
+        '200':
+          description: Страница заказов и метаданные пагинации
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderList'
+              examples:
+                firstPage:
+                  summary: Первая страница заказов в статусе delivering
+                  value:
+                    items:
+                      - orderId: 1042
+                        status: delivering
+                        createdAt: '2026-11-25T11:58:12Z'
+                        updatedAt: '2026-11-25T12:24:10Z'
+                        customer:
+                          name: Анна Петрова
+                          phone: "+7 913 555-01-42"
+                        deliveryAddress: г. Новосибирск, ул. Ленина, 42, кв. 17
+                        comment: Позвонить за 10 минут
+                        items:
+                          - itemId: 1
+                            dishId: 501
+                            name: Пицца Маргарита
+                            quantity: 1
+                            unitPrice: 590
+                            totalPrice: 590
+                          - itemId: 2
+                            dishId: 512
+                            name: Салат Цезарь
+                            quantity: 2
+                            unitPrice: 290
+                            totalPrice: 580
+                          - itemId: 3
+                            dishId: 530
+                            name: Морс клюквенный
+                            quantity: 1
+                            unitPrice: 150
+                            totalPrice: 150
+                        totalPrice: 1320
+                        courier:
+                          name: Дмитрий Соколов
+                          phone: "+7 913 555-21-08"
+                        estimatedDeliveryAt: '2026-11-25T12:45:00Z'
+                        cancelReason: null
+                        cancelledAt: null
+                    meta:
+                      total: 1
+                      limit: 20
+                      offset: 0
+                emptyPage:
+                  summary: Страница за пределами выборки
+                  value:
+                    items: []
+                    meta:
+                      total: 1
+                      limit: 20
+                      offset: 20
+        '400':
+          description: |
+            Некорректные параметры: неизвестный статус, `limit` вне диапазона
+            1–100, отрицательный `offset`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                badLimit:
+                  summary: limit больше максимума
+                  value:
+                    code: BAD_REQUEST
+                    message: Параметр limit не может превышать 100
+                    details:
+                      field: limit
+                      value: 500
+                badStatus:
+                  summary: Неизвестный статус в фильтре
+                  value:
+                    code: BAD_REQUEST
+                    message: Неизвестный статус заказа 'on_the_way'
+                    details:
+                      field: status
+                      allowed: [created, cooking, delivering, done, cancelled]
+
+  /orders/{orderId}:
+    get:
+      tags:
+        - Заказы
+      operationId: getOrder
+      summary: Карточка заказа
+      description: |
+        Возвращает заказ по номеру: текущий статус, состав, сумму, адрес и
+        данные курьера, если заказ уже передан в доставку.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Карточка заказа с текущим статусом
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                delivering:
+                  summary: Заказ №1042 в пути, курьер Дмитрий Соколов
+                  value:
+                    orderId: 1042
+                    status: delivering
+                    createdAt: '2026-11-25T11:58:12Z'
+                    updatedAt: '2026-11-25T12:24:10Z'
+                    customer:
+                      name: Анна Петрова
+                      phone: "+7 913 555-01-42"
+                    deliveryAddress: г. Новосибирск, ул. Ленина, 42, кв. 17
+                    comment: Позвонить за 10 минут
+                    items:
+                      - itemId: 1
+                        dishId: 501
+                        name: Пицца Маргарита
+                        quantity: 1
+                        unitPrice: 590
+                        totalPrice: 590
+                      - itemId: 2
+                        dishId: 512
+                        name: Салат Цезарь
+                        quantity: 2
+                        unitPrice: 290
+                        totalPrice: 580
+                      - itemId: 3
+                        dishId: 530
+                        name: Морс клюквенный
+                        quantity: 1
+                        unitPrice: 150
+                        totalPrice: 150
+                    totalPrice: 1320
+                    courier:
+                      name: Дмитрий Соколов
+                      phone: "+7 913 555-21-08"
+                    estimatedDeliveryAt: '2026-11-25T12:45:00Z'
+                    cancelReason: null
+                    cancelledAt: null
+        '404':
+          description: Заказ с указанным номером не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notFound:
+                  summary: Несуществующий заказ
+                  value:
+                    code: ORDER_NOT_FOUND
+                    message: Заказ 9999 не найден
+                    details:
+                      orderId: 9999
+
+  /orders/{orderId}/status:
+    patch:
+      tags:
+        - Статусы
+      operationId: updateOrderStatus
+      summary: Сменить статус заказа
+      description: |
+        Переводит заказ в следующий статус. Операцию вызывают ресторан,
+        курьер или поддержка.
+
+        Допустимые переходы:
+        `created → cooking`, `cooking → delivering`,
+        `delivering → done`, а также отмена через
+        `POST /orders/{orderId}/cancel`.
+
+        Переход назад, перескок через этап и любой переход из терминальных
+        `done` / `cancelled` отклоняются с `409 INVALID_STATUS_TRANSITION`.
+        Повтор текущего статуса возвращает `200` и не добавляет событие в
+        историю.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateStatusRequest'
+            examples:
+              toDelivering:
+                summary: Курьер забрал заказ
+                value:
+                  status: delivering
+                  comment: Курьер Дмитрий Соколов забрал заказ в 12:24
+              toDone:
+                summary: Заказ вручён клиенту
+                value:
+                  status: done
+                  comment: Передан лично в руки
+      responses:
+        '200':
+          description: Статус изменён, возвращена обновлённая карточка заказа
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                done:
+                  summary: Заказ №1042 доставлен
+                  value:
+                    orderId: 1042
+                    status: done
+                    createdAt: '2026-11-25T11:58:12Z'
+                    updatedAt: '2026-11-25T12:41:05Z'
+                    customer:
+                      name: Анна Петрова
+                      phone: "+7 913 555-01-42"
+                    deliveryAddress: г. Новосибирск, ул. Ленина, 42, кв. 17
+                    comment: Позвонить за 10 минут
+                    items:
+                      - itemId: 1
+                        dishId: 501
+                        name: Пицца Маргарита
+                        quantity: 1
+                        unitPrice: 590
+                        totalPrice: 590
+                      - itemId: 2
+                        dishId: 512
+                        name: Салат Цезарь
+                        quantity: 2
+                        unitPrice: 290
+                        totalPrice: 580
+                      - itemId: 3
+                        dishId: 530
+                        name: Морс клюквенный
+                        quantity: 1
+                        unitPrice: 150
+                        totalPrice: 150
+                    totalPrice: 1320
+                    courier:
+                      name: Дмитрий Соколов
+                      phone: "+7 913 555-21-08"
+                    estimatedDeliveryAt: '2026-11-25T12:45:00Z'
+                    cancelReason: null
+                    cancelledAt: null
+        '400':
+          description: Некорректное тело запроса или неизвестный статус
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                badStatus:
+                  summary: Статус вне перечисления
+                  value:
+                    code: BAD_REQUEST
+                    message: Неизвестный статус 'on_the_way'
+                    details:
+                      field: status
+                      allowed: [created, cooking, delivering, done, cancelled]
+        '404':
+          description: Заказ с указанным номером не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notFound:
+                  summary: Несуществующий заказ
+                  value:
+                    code: ORDER_NOT_FOUND
+                    message: Заказ 9999 не найден
+                    details:
+                      orderId: 9999
+        '409':
+          description: |
+            Недопустимый переход: назад, через этап или из терминального
+            статуса.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                backward:
+                  summary: Попытка вернуть заказ из delivering в created
+                  value:
+                    code: INVALID_STATUS_TRANSITION
+                    message: Нельзя перевести заказ из delivering в created
+                    details:
+                      orderId: 1042
+                      from: delivering
+                      to: created
+                afterDone:
+                  summary: Попытка изменить доставленный заказ
+                  value:
+                    code: INVALID_STATUS_TRANSITION
+                    message: Заказ уже доставлен, изменение статуса невозможно
+                    details:
+                      orderId: 1042
+                      from: done
+                      to: cooking
+
+  /orders/{orderId}/cancel:
+    post:
+      tags:
+        - Статусы
+      operationId: cancelOrder
+      summary: Отменить заказ
+      description: |
+        Отменяет заказ и переводит его в `cancelled`. Отмена возможна только
+        из `created` и `cooking` — до того, как курьер забрал заказ.
+
+        Если заказ уже в `delivering`, возвращается
+        `409 CANCEL_NOT_ALLOWED`. Для `done` и `cancelled` отмена также
+        невозможна (`409`). Причина отмены сохраняется в `cancelReason` и
+        попадает в историю статусов.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 300
+                  description: Причина отмены, необязательна
+                  example: Передумал, закажу позже
+            examples:
+              withReason:
+                summary: Клиент указал причину
+                value:
+                  reason: Передумал, закажу позже
+      responses:
+        '200':
+          description: Заказ отменён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                cancelled:
+                  summary: Заказ №1042 отменён до передачи курьеру
+                  value:
+                    orderId: 1042
+                    status: cancelled
+                    createdAt: '2026-11-25T11:58:12Z'
+                    updatedAt: '2026-11-25T12:07:33Z'
+                    customer:
+                      name: Анна Петрова
+                      phone: "+7 913 555-01-42"
+                    deliveryAddress: г. Новосибирск, ул. Ленина, 42, кв. 17
+                    comment: Позвонить за 10 минут
+                    items:
+                      - itemId: 1
+                        dishId: 501
+                        name: Пицца Маргарита
+                        quantity: 1
+                        unitPrice: 590
+                        totalPrice: 590
+                      - itemId: 2
+                        dishId: 512
+                        name: Салат Цезарь
+                        quantity: 2
+                        unitPrice: 290
+                        totalPrice: 580
+                      - itemId: 3
+                        dishId: 530
+                        name: Морс клюквенный
+                        quantity: 1
+                        unitPrice: 150
+                        totalPrice: 150
+                    totalPrice: 1320
+                    courier: null
+                    estimatedDeliveryAt: '2026-11-25T12:45:00Z'
+                    cancelReason: Передумал, закажу позже
+                    cancelledAt: '2026-11-25T12:07:33Z'
+        '404':
+          description: Заказ с указанным номером не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notFound:
+                  summary: Несуществующий заказ
+                  value:
+                    code: ORDER_NOT_FOUND
+                    message: Заказ 9999 не найден
+                    details:
+                      orderId: 9999
+        '409':
+          description: |
+            Отмена невозможна: курьер уже забрал заказ, либо заказ доставлен
+            или уже отменён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                delivering:
+                  summary: Курьер уже в пути
+                  value:
+                    code: CANCEL_NOT_ALLOWED
+                    message: Заказ уже передан курьеру, отмена невозможна
+                    details:
+                      orderId: 1042
+                      status: delivering
+                alreadyDone:
+                  summary: Заказ уже доставлен
+                  value:
+                    code: CANCEL_NOT_ALLOWED
+                    message: Заказ уже доставлен, отмена невозможна
+                    details:
+                      orderId: 1042
+                      status: done
+
+  /orders/{orderId}/history:
+    get:
+      tags:
+        - История
+      operationId: getOrderHistory
+      summary: История статусов заказа
+      description: |
+        Возвращает журнал изменения статусов по возрастанию времени. Каждое
+        событие содержит статус, момент времени, автора изменения
+        (`customer`, `restaurant`, `courier`, `system`) и необязательный
+        комментарий. История не редактируется и не удаляется.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Список событий статусов от создания до текущего состояния
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StatusEvent'
+              examples:
+                fullHistory:
+                  summary: Путь заказа №1042 от создания до доставки
+                  value:
+                    - eventId: 9001
+                      status: created
+                      changedAt: '2026-11-25T11:58:12Z'
+                      changedBy: customer
+                      comment: Заказ оформлен в приложении
+                    - eventId: 9002
+                      status: cooking
+                      changedAt: '2026-11-25T12:05:40Z'
+                      changedBy: restaurant
+                      comment: Заказ принят кухней
+                    - eventId: 9003
+                      status: delivering
+                      changedAt: '2026-11-25T12:24:10Z'
+                      changedBy: courier
+                      comment: Курьер Дмитрий Соколов забрал заказ
+                    - eventId: 9004
+                      status: done
+                      changedAt: '2026-11-25T12:41:05Z'
+                      changedBy: courier
+                      comment: Передан лично в руки
+        '404':
+          description: Заказ с указанным номером не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                notFound:
+                  summary: Несуществующий заказ
+                  value:
+                    code: ORDER_NOT_FOUND
+                    message: Заказ 9999 не найден
+                    details:
+                      orderId: 9999
+
+components:
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      description: Номер заказа, например 1042
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        example: 1042
+
+  schemas:
+    Order:
+      type: object
+      description: Заказ доставки еды с текущим статусом и составом
+      required:
+        - orderId
+        - status
+        - createdAt
+        - updatedAt
+        - customer
+        - deliveryAddress
+        - items
+        - totalPrice
+      properties:
+        orderId:
+          type: integer
+          format: int64
+          description: Номер заказа, уникален
+          example: 1042
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        createdAt:
+          type: string
+          format: date-time
+          description: Момент создания заказа, ISO 8601 UTC
+          example: '2026-11-25T11:58:12Z'
+        updatedAt:
+          type: string
+          format: date-time
+          description: Момент последнего изменения статуса, ISO 8601 UTC
+          example: '2026-11-25T12:24:10Z'
+        customer:
+          $ref: '#/components/schemas/Customer'
+        deliveryAddress:
+          type: string
+          description: Полный адрес доставки
+          example: г. Новосибирск, ул. Ленина, 42, кв. 17
+        comment:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: Комментарий клиента к заказу
+          example: Позвонить за 10 минут
+        items:
+          type: array
+          description: Позиции заказа
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        totalPrice:
+          type: integer
+          minimum: 0
+          description: Итоговая сумма заказа в рублях
+          example: 1320
+        courier:
+          allOf:
+            - $ref: '#/components/schemas/Courier'
+          nullable: true
+          description: Курьер, назначенный на заказ; null до статуса delivering
+        estimatedDeliveryAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Расчётное время вручения, ISO 8601 UTC
+          example: '2026-11-25T12:45:00Z'
+        cancelReason:
+          type: string
+          nullable: true
+          maxLength: 300
+          description: Причина отмены, заполняется при статусе cancelled
+          example: Передумал, закажу позже
+        cancelledAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Момент отмены заказа, ISO 8601 UTC
+          example: '2026-11-25T12:07:33Z'
+
+    OrderItem:
+      type: object
+      description: Позиция заказа с рассчитанной стоимостью
+      required:
+        - itemId
+        - dishId
+        - name
+        - quantity
+        - unitPrice
+        - totalPrice
+      properties:
+        itemId:
+          type: integer
+          description: Порядковый номер позиции внутри заказа
+          example: 1
+        dishId:
+          type: integer
+          description: Идентификатор блюда в меню
+          example: 501
+        name:
+          type: string
+          description: Название блюда на момент заказа
+          example: Пицца Маргарита
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 20
+          description: Количество порций
+          example: 1
+        unitPrice:
+          type: integer
+          minimum: 0
+          description: Цена одной порции в рублях
+          example: 590
+        totalPrice:
+          type: integer
+          minimum: 0
+          description: Стоимость позиции, quantity × unitPrice, в рублях
+          example: 590
+        comment:
+          type: string
+          nullable: true
+          maxLength: 200
+          description: Пожелание клиента к позиции
+          example: Без гренок
+
+    OrderStatus:
+      type: string
+      description: |
+        Статус заказа. Основной путь: `created` → `cooking` → `delivering` →
+        `done`. `cancelled` возможен только из `created` и `cooking`.
+        `done` и `cancelled` — терминальные статусы.
+      enum:
+        - created
+        - cooking
+        - delivering
+        - done
+        - cancelled
+      example: delivering
+
+    StatusEvent:
+      type: object
+      description: Запись журнала изменения статуса заказа
+      required:
+        - eventId
+        - status
+        - changedAt
+        - changedBy
+      properties:
+        eventId:
+          type: integer
+          format: int64
+          description: Идентификатор события, возрастает
+          example: 9003
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        changedAt:
+          type: string
+          format: date-time
+          description: Момент перехода, ISO 8601 UTC
+          example: '2026-11-25T12:24:10Z'
+        changedBy:
+          type: string
+          description: Кто изменил статус
+          enum:
+            - customer
+            - restaurant
+            - courier
+            - system
+          example: courier
+        comment:
+          type: string
+          nullable: true
+          maxLength: 300
+          description: Комментарий к переходу
+          example: Курьер Дмитрий Соколов забрал заказ
+
+    Customer:
+      type: object
+      description: Клиент, оформивший заказ
+      required:
+        - name
+        - phone
+      properties:
+        name:
+          type: string
+          maxLength: 120
+          description: Имя клиента
+          example: Анна Петрова
+        phone:
+          type: string
+          description: Телефон в формате +7 XXX XXX-XX-XX
+          example: "+7 913 555-01-42"
+
+    Courier:
+      type: object
+      description: Курьер, доставляющий заказ
+      required:
+        - name
+        - phone
+      properties:
+        name:
+          type: string
+          maxLength: 120
+          description: Имя курьера
+          example: Дмитрий Соколов
+        phone:
+          type: string
+          description: Телефон курьера для связи
+          example: "+7 913 555-21-08"
+
+    CreateOrderItem:
+      type: object
+      description: Позиция при создании заказа; цена рассчитывается сервером
+      required:
+        - dishId
+        - quantity
+      properties:
+        dishId:
+          type: integer
+          description: Идентификатор блюда из меню
+          example: 501
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 20
+          description: Количество порций
+          example: 1
+        comment:
+          type: string
+          maxLength: 200
+          description: Пожелание по блюду
+          example: Без гренок
+
+    CreateOrderRequest:
+      type: object
+      description: Данные для создания заказа
+      required:
+        - customer
+        - deliveryAddress
+        - items
+      properties:
+        customer:
+          $ref: '#/components/schemas/Customer'
+        deliveryAddress:
+          type: string
+          minLength: 10
+          maxLength: 300
+          description: Полный адрес доставки
+          example: г. Новосибирск, ул. Ленина, 42, кв. 17
+        comment:
+          type: string
+          maxLength: 500
+          description: Комментарий ко всему заказу
+          example: Позвонить за 10 минут
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: Позиции заказа, минимум одна
+          items:
+            $ref: '#/components/schemas/CreateOrderItem'
+
+    UpdateStatusRequest:
+      type: object
+      description: Новый статус заказа и необязательный комментарий
+      required:
+        - status
+      properties:
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        comment:
+          type: string
+          maxLength: 300
+          description: Комментарий к переходу, попадёт в историю
+          example: Курьер Дмитрий Соколов забрал заказ в 12:24
+
+    OrderList:
+      type: object
+      description: Страница списка заказов с метаданными пагинации
+      required:
+        - items
+        - meta
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        meta:
+          type: object
+          description: Метаданные выборки
+          required:
+            - total
+            - limit
+            - offset
+          properties:
+            total:
+              type: integer
+              minimum: 0
+              description: Общее количество заказов под фильтром
+              example: 37
+            limit:
+              type: integer
+              minimum: 1
+              maximum: 100
+              description: Размер страницы
+              example: 20
+            offset:
+              type: integer
+              minimum: 0
+              description: Смещение текущей страницы
+              example: 0
+
+    Error:
+      type: object
+      description: Единый формат ошибки API
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: |
+            Стабильный машинный код: `BAD_REQUEST`, `VALIDATION_FAILED`,
+            `ORDER_NOT_FOUND`, `INVALID_STATUS_TRANSITION`,
+            `CANCEL_NOT_ALLOWED`.
+          example: INVALID_STATUS_TRANSITION
+        message:
+          type: string
+          description: Понятное человеку описание ошибки на русском
+          example: Нельзя перевести заказ из delivering в created
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Дополнительный контекст, состав зависит от ошибки
+          example:
+            orderId: 1042
+            from: delivering
+            to: created
