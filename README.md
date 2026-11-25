@@ -157,11 +157,11 @@ git commit -m "merge: согласовать нумерацию «этаж-но�
 
 ### 8. Удалённый репозиторий: push и pull
 
-В учебной версии remote — локальный bare-репозиторий (имитация GitHub, чтобы сценарий можно было воспроизвести без доступа к сети):
+В учебной версии remote — локальный bare-репозиторий (имитация GitHub, чтобы сценарий можно было воспроизвести без доступа к сети). Он вынесен за пределы папки работ — в `D:\Desktop\lab5-origin.git`, чтобы не засорять сдачу:
 
 ```bash
-git init --bare ../lab5-origin.git
-git remote add origin ../lab5-origin.git
+git init --bare ../../lab5-origin.git
+git remote add origin ../../lab5-origin.git
 git push -u origin main
 git push origin renumber-rooms add-labs
 ```
@@ -169,13 +169,13 @@ git push origin renumber-rooms add-labs
 Сценарий «второй разработчик»: клон, правка, push, затем pull в основной копии:
 
 ```bash
-git clone ../lab5-origin.git ../lab5-clone
-cd ../lab5-clone
+git clone ../../lab5-origin.git ../../lab5-clone
+cd ../../lab5-clone
 # добавлен раздел «Доступная среда»
 git commit -am "docs: добавить раздел о доступной среде"
 git push
 
-cd ../lab5
+cd -   # вернуться в lab5
 git pull origin main
 # Updating c797880..458ab37
 # Fast-forward
@@ -218,5 +218,5 @@ git push origin renumber-rooms add-labs
 
 ## Ссылка на репозиторий
 
-Учебная версия: локальный bare-репозиторий `../lab5-origin.git`.
+Учебная версия: локальный bare-репозиторий `D:\Desktop\lab5-origin.git` (вне папки `лабы инт`, чтобы структура сдачи оставалась чистой).
 При публикации на GitHub/GitLab ссылка вида `https://github.com/<логин>/lab5-floor-map`.
