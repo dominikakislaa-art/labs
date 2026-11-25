@@ -181,13 +181,15 @@ git pull origin main
 # Fast-forward
 ```
 
-Для сдачи на GitHub/GitLab достаточно заменить адрес и выполнить push:
+История этой работы опубликована в общем репозитории лаб отдельными ветками:
 
 ```bash
-git remote set-url origin https://github.com/<логин>/lab5-floor-map.git
-git push -u origin main
-git push origin renumber-rooms add-labs
+git push github main:refs/heads/lab5/main
+git push github renumber-rooms:refs/heads/lab5/renumber-rooms
+git push github add-labs:refs/heads/lab5/add-labs
 ```
+
+`lab5/main` — итоговое состояние с merge-коммитом, `lab5/renumber-rooms` и `lab5/add-labs` — ветки до слияния (по ним видно, откуда взялся конфликт).
 
 ### 9. Итоговая история
 
@@ -218,5 +220,6 @@ git push origin renumber-rooms add-labs
 
 ## Ссылка на репозиторий
 
-Учебная версия: локальный bare-репозиторий `D:\Desktop\lab5-origin.git` (вне папки `лабы инт`, чтобы структура сдачи оставалась чистой).
-При публикации на GitHub/GitLab ссылка вида `https://github.com/<логин>/lab5-floor-map`.
+Работа опубликована в общем репозитории: <https://github.com/dominikakislaa-art/labs> — ветки `lab5/main`, `lab5/renumber-rooms`, `lab5/add-labs`. Файлы самой работы лежат в папке `lab5` ветки `main`.
+
+Учебный remote (bare-репозиторий) — `D:\Desktop\lab5-origin.git`; он вынесен за пределы папки сдачи, чтобы структура оставалась чистой.
